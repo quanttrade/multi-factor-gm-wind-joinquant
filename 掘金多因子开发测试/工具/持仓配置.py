@@ -1,6 +1,8 @@
 import numpy as np
+import scipy.stats, scipy.optimize
 from WindPy import w
 import cvxopt
+import pyrb
 import sys
 sys.path.append('D:\\programs\\多因子策略开发\\掘金多因子开发测试\\工具')
 from utils import list_wind2jq, list_jq2wind, SW1_INDEX
@@ -8,7 +10,7 @@ from utils import list_wind2jq, list_jq2wind, SW1_INDEX
 
 class WeightsAllocation(object):
     def __init__(self, code_list, date):
-        self.code_list = code_list  # code_list用掘金的格式
+        self.code_list = code_list  # code_list用聚宽的格式
         self.date = date  # date日收盘后计算配置比例
 
     def get_weights(self):
@@ -28,7 +30,7 @@ class 指数权重(WeightsAllocation):
     def __init__(self, code_list, date, index_code):
         # 按照index_code的编制权重配置，code_list的股票应为index_code的成分股
         self.index_code = index_code
-        super().__init__(code_list, date)
+        WeightsAllocation.__init__(self, code_list, date)
 
     def get_weights(self):
         w.start()
@@ -97,7 +99,7 @@ class 自由流通市值权重(WeightsAllocation):
 class 方差极小化权重_基本版(WeightsAllocation):
     def __init__(self, code_list, date, N=60):
         self.N = N  # 收益率数据采样的历史大小，默认N=60，为一个季度的数据
-        super().__init__(code_list, date)
+        WeightsAllocation.__init__(self, code_list, date)
 
     def get_weights(self):
         code_list = list_jq2wind(self.code_list)
@@ -109,10 +111,9 @@ class 方差极小化权重_基本版(WeightsAllocation):
         return code_weights
 
     def _get_coef(self, code_list):
-        # 提供_calc_weights需要计算的参数
-        w.start()
-        return_value = np.array(w.wsd(code_list, "pct_chg", "ED-" + str(self.N - 1) + "TD", self.date, "").Data)
-        return_cov = np.cov(return_value)
+        from 风险评估 import 方差风险_历史数据
+        risk_model = 方差风险_历史数据(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
         return return_cov
 
     def _calc_weights(self, code_list):
@@ -152,12 +153,9 @@ class 最大分散化组合_基本版(方差极小化权重_基本版):
 
 class 最大分散化组合_基本版_OAS(最大分散化组合_基本版):
     def _get_coef(self, code_list):
-        # 提供_calc_weights需要计算的参数
-        w.start()
-        return_value = np.array(w.wsd(code_list, "pct_chg", "ED-" + str(self.N - 1) + "TD", self.date, "").Data)
-        from sklearn.covariance import OAS
-        return_cov = OAS().fit(return_value.transpose())
-        return_cov = return_cov.covariance_
+        from 风险评估 import 方差风险_历史数据_OAS
+        risk_model = 方差风险_历史数据_OAS(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
         return return_cov
 
 
@@ -204,12 +202,9 @@ class 最大分散化组合_行业版(方差极小化权重_行业版):
 
 class 最大分散化组合_行业版_OAS(最大分散化组合_行业版):
     def _get_coef(self, code_list):
-        # 提供_calc_weights需要计算的参数
-        w.start()
-        return_value = np.array(w.wsd(code_list, "pct_chg", "ED-" + str(self.N - 1) + "TD", self.date, "").Data)
-        from sklearn.covariance import OAS
-        return_cov = OAS().fit(return_value.transpose())
-        return_cov = return_cov.covariance_
+        from 风险评估 import 方差风险_历史数据_OAS
+        risk_model = 方差风险_历史数据_OAS(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
         return return_cov
 
 
@@ -247,7 +242,7 @@ class 风险平价组合_迭代求解基本版(方差极小化权重_基本版):
         y_n = y_n / np.sum(y_n)  # 和为一
         eps_value = np.sqrt(np.sum((y_n-y_0) * (y_n-y_0)))
         while eps_value > 1e-8:  # 计算精度评价标准
-            print(eps_value)
+            # print(eps_value)
             y_0 = y_n
             y_n = y_0 - np.matmul(J(y_0), F(y_0))
             y_n = np.abs(y_n)
@@ -259,15 +254,127 @@ class 风险平价组合_迭代求解基本版(方差极小化权重_基本版):
 
 class 风险平价组合_迭代求解基本版_OAS(风险平价组合_迭代求解基本版):
     def _get_coef(self, code_list):
-        # 提供_calc_weights需要计算的参数
-        w.start()
-        return_value = np.array(w.wsd(code_list, "pct_chg", "ED-" + str(self.N - 1) + "TD", self.date, "").Data)
-        from sklearn.covariance import OAS
-        return_cov = OAS().fit(return_value.transpose())
-        return_cov = return_cov.covariance_
+        from 风险评估 import 方差风险_历史数据_OAS
+        risk_model = 方差风险_历史数据_OAS(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
         return return_cov
 
 
+class 风险平价组合_模块求解基本版(方差极小化权重_基本版):
+    def _calc_weights(self, code_list):
+        # 风险平价组合，迭代法求解
+        sigma = self._get_coef(code_list)
+        ERC = pyrb.EqualRiskContribution(sigma)
+        ERC.solve()
+        weights = ERC.x
+        return weights
+
+
+class 风险平价组合_模块求解基本版_OAS(风险平价组合_模块求解基本版):
+    def _get_coef(self, code_list):
+        from 风险评估 import 方差风险_历史数据_OAS
+        risk_model = 方差风险_历史数据_OAS(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
+        return return_cov
+
+
+class 风险预算组合_模块求解基本版(方差极小化权重_基本版):
+    def __init__(self, code_list, date, N=60, risk_budget=None):
+        if risk_budget is None:
+            self.risk_budget = np.ones(len(code_list))
+        else:
+            self.risk_budget = risk_budget  # 风险预算，行向量，无需归一化
+        方差极小化权重_基本版.__init__(self, code_list, date, N)
+
+    def _calc_weights(self, code_list):
+        # 风险平价组合，迭代法求解
+        sigma = self._get_coef(code_list)
+        RB = pyrb.RiskBudgeting(sigma, self.risk_budget)
+        RB.solve()
+        print('风险配置比例为：', RB.get_risk_contributions())
+        weights = RB.x
+        return weights
+
+
+class 风险预算组合_模块求解基本版_OAS(风险预算组合_模块求解基本版):
+    def _get_coef(self, code_list):
+        from 风险评估 import 方差风险_历史数据_OAS
+        risk_model = 方差风险_历史数据_OAS(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
+        return return_cov
+
+
+class 风险预算组合_模块求解基本版_带约束(方差极小化权重_基本版):
+    def __init__(self, code_list, date, N=60, risk_budget=None, bounds=None):
+        if risk_budget is None:
+            self.risk_budget = np.ones(len(code_list))
+        else:
+            self.risk_budget = risk_budget  # 风险预算，行向量，无需归一化
+        self.bounds = bounds  # 约束界，(n, 2)的np.array，n为品种个数
+        方差极小化权重_基本版.__init__(self, code_list, date, N)
+
+    def _calc_weights(self, code_list):
+        # 风险平价组合，迭代法求解
+        sigma = self._get_coef(code_list)
+        CRB = pyrb.ConstrainedRiskBudgeting(sigma, self.risk_budget, bounds=self.bounds)
+        CRB.solve()
+        print('风险配置比例为：', CRB.get_risk_contributions())
+        weights = CRB.x
+        return weights
+
+
+class 风险预算组合_模块求解基本版_带约束_OAS(风险预算组合_模块求解基本版_带约束):
+    def _get_coef(self, code_list):
+        from 风险评估 import 方差风险_历史数据_OAS
+        risk_model = 方差风险_历史数据_OAS(code_list, self.date, self.N)
+        return_cov = risk_model.return_cov
+        return return_cov
+
+
+class 高阶矩优化配置策略_V0(WeightsAllocation):
+    def __init__(self, code_list, date, N=60, w2=1.0, w3=1.0, w4=1.0):
+        self.N = N  # 收益率数据采样的历史大小，默认N=60，为一个季度的数据
+        self.w2 = w2  # 优化目标函数的权重参数
+        self.w3 = w3
+        self.w4 = w4
+        super().__init__(code_list, date)
+
+    def get_weights(self):
+        code_list = list_jq2wind(self.code_list)
+        code_weights = {}
+        return_value = self._get_return(code_list)
+        def optimization_target(weight_temp):
+            weight_temp = weight_temp[:, np.newaxis]
+            portfolio_return_value = np.matmul(weight_temp.transpose(), return_value)[0, :]  # 组合的投资回报序列
+            mean = np.mean(portfolio_return_value)
+            var = np.var(portfolio_return_value)
+            skew = scipy.stats.skew(portfolio_return_value)
+            kurtosis = scipy.stats.kurtosis(portfolio_return_value)
+            loss = self.w2 * var + self.w3 * skew + self.w4 * kurtosis  # 对方差、偏度、峰度进行优化，期望值最小越好
+            return loss
+        def constraint(weight_temp):
+            return np.sum(weight_temp) - 1.0
+        n = len(self.code_list)  # 资产个数
+        x_0 = np.ones((n,)) * 1.0 / n
+        bounds = n * ((0.0, None),)  # 权重非负约束条件
+        res = scipy.optimize.minimize(optimization_target, x_0, method='SLSQP', bounds=bounds, constraints={'type': 'eq', 'fun': constraint})
+        # print(res)
+        if res.success:  # 优化成功
+            x = res.x
+        else:  # 优化失败，用等权
+            x = x_0
+        for i in range(len(code_list)):
+            code = code_list[i]
+            code_weights[list_wind2jq([code])[0]] = x[i]
+        return code_weights
+
+    def _get_return(self, code_list):
+        # 提供_calc_weights需要计算的参数
+        w.start()
+        return_value = np.array(w.wsd(code_list, "pct_chg", "ED-" + str(self.N - 1) + "TD", self.date, "").Data)
+        return return_value
+
+
 if __name__ == '__main__':
-    model = 风险平价组合_迭代求解基本版(['000002.XSHE', '600000.XSHG', '002415.XSHE', '601012.XSHG', '601009.XSHG'], '2018-11-22')
+    model = 风险预算组合_模块求解基本版(['000002.XSHE', '600000.XSHG', '002415.XSHE', '601012.XSHG', '601009.XSHG'], '2019-11-06', risk_budget=[0.2, 0.3, 0.4, 0.5, 0.6])
     print(model.get_weights())

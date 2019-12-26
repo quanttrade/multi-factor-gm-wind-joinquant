@@ -2,40 +2,35 @@ from gm.api import *
 import QuantLib as ql
 from WindPy import w
 import json
+
 import sys
 sys.path.append('D:\\programs\\多因子策略开发\\掘金多因子开发测试\\工具')
 # 引入工具函数和学习器
-from utils import get_trading_date_from_now, list_wind2jq, list_gm2wind
-from master_strategy import 本杰明格雷厄姆成长股内在价值投资法 as STRATEGY
-from 持仓配置 import 方差极小化权重_基本版 as WEIGHTS
+from utils import get_trading_date_from_now, list_wind2jq, get_trading_date_list_by_day_monthly
+from 大师选股 import 北上资金趋势选股V1 as STRATEGY
+from 持仓配置 import 等权持仓 as WEIGHTS
 from 候选股票 import SelectedStockPoolFromListV1
 
 w.start()
 
 # 回测的基本参数的设定
-BACKTEST_START_DATE = '2015-01-05'  # 回测开始日期
-BACKTEST_END_DATE = '2018-11-02'  # 回测结束日期，测试结束日期不运用算法
-INCLUDED_INDEX = ['000300.SH']  # 股票池代码，用Wind代码
+BACKTEST_START_DATE = '2019-03-01'  # 回测开始日期，开始日期与结束日期都是交易日，从开始日期开盘回测到结束日期收盘，与回测软件一直
+BACKTEST_END_DATE = '2019-09-19'  # 回测结束日期
+INCLUDED_INDEX = ['881001.WI']  # 股票池代码，用Wind代码
 EXCLUDED_INDEX = []  # 剔除的股票代码
-TRADING_DATE = '10'  # 每月的调仓日期，非交易日寻找下一个最近的交易日
+TRADING_DATES_LIST = ['1', '16']  # 每月的调仓日期，非交易日寻找下一个最近的交易日
 
 # 用于记录调仓信息的字典
 stock_dict = {}
 
 # 根据回测阶段选取好调仓日期
 trading_date_list = []  # 记录调仓日期的列表
-i = 0
-while True:
-    date_now = get_trading_date_from_now(BACKTEST_START_DATE, i, ql.Days)  # 遍历每个交易日
-    date_trading = get_trading_date_from_now(date_now.split('-')[0] + '-' + date_now.split('-')[1] + '-' + TRADING_DATE, 0, ql.Days)
-    if date_now == date_trading:
-        trading_date_list.append(date_now)
-    i += 1
-    if date_now == BACKTEST_END_DATE:
-        break
 
 
 def init(context):
+    # 调仓日期获取
+    global trading_date_list
+    trading_date_list = get_trading_date_list_by_day_monthly(BACKTEST_START_DATE, BACKTEST_END_DATE, TRADING_DATES_LIST)
     # 每天time_rule定时执行algo任务，time_rule处于09:00:00和15:00:00之间
     schedule(schedule_func=algo, date_rule='daily', time_rule='10:00:00')
 
@@ -49,7 +44,8 @@ def algo(context):
         print(date_now+'日回测程序执行中...')
         # 根据指数获取股票候选池的代码
         code_list = SelectedStockPoolFromListV1(INCLUDED_INDEX, EXCLUDED_INDEX, date_previous).get_stock_pool()
-        strategy = STRATEGY(code_list, date_previous, 0.9)
+        # 按照选股策略选股，与选股策略接口保持一致
+        strategy = STRATEGY(code_list, date_previous)
         select_code_list = list_wind2jq(strategy.select_code())
         if len(select_code_list) > 0:  # 有可选股票时选取合适的股票
             stock_now = WEIGHTS(select_code_list, date_previous).get_weights()

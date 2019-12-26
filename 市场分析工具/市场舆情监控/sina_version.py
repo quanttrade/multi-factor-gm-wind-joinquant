@@ -1,25 +1,26 @@
 import tushare as ts
 from aip import AipNlp
 import time
-import pyecharts
+from pyecharts.charts import WordCloud
+from pyecharts.options import InitOpts
 import math
 
-start_date = '2019-01-28 15:00:00'
-end_date = '2019-01-29 09:00:00'
+start_date = '2019-08-28 15:00:00'
+end_date = '2019-08-29 08:30:00'
 # 百度配置
 APP_ID = '10709883'
 API_KEY = 'DP7yZde5EK2MEKLzcjzwCCp5'
 SECRET_KEY = 'EQPFBZOjgyyhpf9llpsZobIUIftpyj8I'
 client = AipNlp(APP_ID, API_KEY, SECRET_KEY)
 # tushare配置
-pro = ts.pro_api(token='9668f6b57f4e3fe1199446a9c7b251d553963832bbf6e411b8065ea2')
+pro = ts.pro_api(token='fcd3ee99a7d5f0e27c546d074a001f0b3eae01312c4dd8354415fba1')
 # 股票中文名称列表
 names_data = pro.stock_basic(exchange='', list_status='L', fields='name').values
 name_normalization = lambda d: d[0][:-1] if d[0][-1] == 'A' or d[0][-1] == 'B' else d[0]
 names_data = [name_normalization(d) for d in names_data]
 
 # 提取新闻信息
-df_news = pro.news(src='sina', start_date=start_date, end_date=end_date)
+df_news = pro.news(src='sina', fields='datetime,content,channels', start_date=start_date, end_date=end_date)
 ds_content = df_news['content']
 ds_channel = df_news['channels']
 
@@ -34,6 +35,8 @@ for i in range(len(ds_content)):
     if len(content_title2) > 40:  # 调整标题长度过长
         content_title2 = content_title2[:40]
     content_main2 = content_main
+    if content_main2 == '':  # 无内容，跳过
+        continue
     while len(content_main2) < 50:  # 调整内容长度过短
         content_main2 = 2 * content_main2
     print('正在处理第%d条新闻，总共%d篇' % (i + 1, len(ds_content)))
@@ -53,7 +56,7 @@ for i in range(len(ds_content)):
         items = baidu_return['items']
         for item in items:
             words_score_dict[item['tag']] = words_score_dict.get(item['tag'], 0.0) + item['score']
-    except UnicodeEncodeError:
+    except (UnicodeEncodeError, UnicodeDecodeError, KeyError):
         continue
 
 # 舆情负面程度排序
@@ -63,7 +66,7 @@ content_negative = content_negative[:20]  # 取最负面的若干条新闻
 name_negative = []
 negative_content = '重要舆情新闻汇总\n\n'
 for i in range(len(content_negative)):
-    negative_content += ('第' + str(i+1) + '条新闻：' + content_negative[i][0] + '\n\n')
+    negative_content += ('    第' + str(i+1) + '条新闻：' + content_negative[i][0] + '\n\n')
     for name in names_data:
         if name in content_negative[i][0]:
             name_negative.append(name)
@@ -87,7 +90,8 @@ for w in delete_words:
 sorted_words_score = sorted(words_score_dict.items(), key=lambda d: d[1], reverse=True)
 print(sorted_words_score)
 words, scores = zip(*sorted_words_score)
-word_cloud = pyecharts.WordCloud(width=1600, height=1000)
+word_cloud = WordCloud(InitOpts(width="1600px", height="1000px"))
 scores = [math.sqrt(score) for score in scores]  # 调整权重以画图显示的更好
-word_cloud.add("", words, scores, shape="circle")
+words = list(zip(words, scores))
+word_cloud.add("", words, shape="circle")
 word_cloud.render('data\\'+end_date[:10]+'舆情晨报词云.html')  # 保存文件

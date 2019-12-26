@@ -4,15 +4,24 @@ import numpy as np
 import pandas as pd
 import datetime
 import QuantLib as ql
-import jqdatasdk
+import abc
+from sklearn.linear_model import LinearRegression
+
 import sys
 sys.path.append('D:\\programs\\多因子策略开发\\掘金多因子开发测试\\工具')
 from utils import get_trading_date_from_now, SW1_INDEX
 
 
+# 基类，需继承
+# 三级继承结构
+# 第一级：SingleFactorReasearch，基本功能，抽象类
+# 第二级：带有多参数的因子类，抽象类
+# 第三级：统一为date和code_list接口的因子类，实际使用的类（部分类无二级继承结构，三级直接从一级继承），三级对二级的参数进行固化
+# 抽象类的标志为__init__带有abc.abstractmethod修饰
 class SingleFactorReasearch():
+    @abc.abstractmethod
     def __init__(self, date, code_list, factor_name):
-        # date为查询因子的日期，'yyyy-mm-dd'格式
+        # date为查询因子的日期，'yyyy-mm-dd'格式，date日收盘后查询
         # code_list为查询因子的股票代码列表
         self.date = date.split('-')
         self.code_list = code_list
@@ -61,8 +70,116 @@ class NetProfitGrowRateV2(SingleFactorReasearch):
         return NPGR
 
 
+# 营业收入增长率
+class RevenueGrowthRate(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '营业收入增长率'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list, "fa_orgr_ttm", "tradeDate="+''.join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 净利润值对N个月时间回归，返回二次项系数，需继承
+class ProfitAcc(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N):
+        # N为期数，一个季度为一期
+        factor_name = str(N) + '个月利润成长加速度'
+        self.N = N
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        X_0 = np.arange(1, (self.N+1), 1).reshape((self.N, 1))
+        X_1 = X_0 * X_0
+        X = np.concatenate((X_1, X_0), axis=1)
+        profit_data = []
+        alpha = []
+        for i in np.arange(0, self.N*3, 3):  # 按日期遍历提取利润数据
+            temp_day = get_trading_date_from_now("-".join(self.date), -int(i), ql.Months)
+            profit = w.wss(self.code_list, "profit_ttm", "unit=1;tradeDate=" + str(temp_day)).Data[0]
+            profit_data.append(profit)
+        profit_data = np.array(profit_data).transpose()
+        for y in profit_data:  # 回归计算因子值
+            try:
+                model = LinearRegression().fit(X, y)
+                a = model.coef_[0]
+                alpha.append(a)
+            except ValueError:
+                alpha.append(np.nan)
+        alpha = np.array(alpha)
+        df = pd.DataFrame(data=alpha, index=self.code_list, columns=[self.factor_name]).dropna()
+        return df
+
+
+# 净利润值对8个月时间回归，返回二次项系数
+class ProfitAcc_8(ProfitAcc):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 8)
+
+
+# 连续N个月的净利润同比增速的均值除以其标准差，需继承
+class SteadyProfitGrowth(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N=8):
+        # N为期数，一个季度为一期
+        factor_name = str(N) + '个月利润稳健增速'
+        self.N = N
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        profit_data = []
+        data = []
+        for i in np.arange(0, self.N*3, 3):  # 按日期遍历提取利润数据
+            temp_day = get_trading_date_from_now("-".join(self.date), -int(i), ql.Months)
+            profit = w.wss(self.code_list, "profit_ttm", "unit=1;tradeDate=" + str(temp_day)).Data[0]
+            profit_data.append(profit)
+        profit_data = np.array(profit_data).transpose()
+        for j in profit_data:
+            mean = np.mean(np.array(j))
+            std = np.std(np.array(j))
+            data_temp = mean/std
+            data.append(data_temp)
+        data = np.array(data)
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 连续8期的净利润同比增速的均值除以其标准差
+class SteadyProfitGrowth_8(SteadyProfitGrowth):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 8)
+
+
+# N个月利润稳健加速度，需继承
+class SteadyProfitAcc(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N=8):
+        factor_name = str(N) + '个月利润稳健加速度'
+        # N为期数，一个季度为一期
+        self.N = N
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_previous = get_trading_date_from_now("-".join(self.date), -3, ql.Months)
+        current_data = SteadyProfitGrowth("-".join(self.date), self.code_list).get_factor()
+        previous_data = SteadyProfitGrowth(date_previous, self.code_list).get_factor()
+        data = current_data - previous_data
+        data.rename(columns={"利润稳健增速": "利润稳健加速度"}, inplace=True)
+        return data
+
+
+# 连续8个月的净利润同比增速的均值除以其标准差
+class SteadyProfitAcc_8(SteadyProfitAcc):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 8)
+
+
 # 一致预测净利润增长率（6个月数据计算）
-class EstimateNetProfitGrowRateFY16M(SingleFactorReasearch):
+class EstimateNetProfitGrowRateFY1_6M(SingleFactorReasearch):
     def __init__(self, date, code_list):
         factor_name = '一致预测净利润增长率（6个月数据计算）'
         super().__init__(date, code_list, factor_name)
@@ -87,73 +204,9 @@ class InventoryTurnRatio(SingleFactorReasearch):
         return InvTurn
 
 
-# 5日移动均线
-class MA5(SingleFactorReasearch):
-    def __init__(self, date, code_list):
-        factor_name = '5日移动均线'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        MA_data = np.array(w.wss(self.code_list,  "MA", "tradeDate="+"".join(date_list)+";MA_N=5;priceAdj=T;cycle=D").Data[0])
-        MA5 = pd.DataFrame(data=MA_data, index=self.code_list, columns=[self.factor_name])
-        return MA5
-
-
-# 10日移动均线
-class MA10(SingleFactorReasearch):
-    def __init__(self, date, code_list):
-        factor_name = '10日移动均线'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        MA_data = np.array(w.wss(self.code_list,  "MA", "tradeDate="+"".join(date_list)+";MA_N=10;priceAdj=T;cycle=D").Data[0])
-        MA10 = pd.DataFrame(data=MA_data, index=self.code_list, columns=[self.factor_name])
-        return MA10
-
-
-# 20日移动均线
-class MA20(SingleFactorReasearch):
-    def __init__(self, date, code_list):
-        factor_name = '20日移动均线'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        MA_data = np.array(w.wss(self.code_list,  "MA", "tradeDate="+"".join(date_list)+";MA_N=20;priceAdj=T;cycle=D").Data[0])
-        MA20 = pd.DataFrame(data=MA_data, index=self.code_list, columns=[self.factor_name])
-        return MA20
-
-
-# 60日移动均线
-class MA60(SingleFactorReasearch):
-    def __init__(self, date, code_list):
-        factor_name = '60日移动均线'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        MA_data = np.array(w.wss(self.code_list,  "MA", "tradeDate="+"".join(date_list)+";MA_N=60;priceAdj=T;cycle=D").Data[0])
-        MA60 = pd.DataFrame(data=MA_data, index=self.code_list, columns=[self.factor_name])
-        return MA60
-
-
-# 120日移动均线
-class MA120(SingleFactorReasearch):
-    def __init__(self, date, code_list):
-        factor_name = '120日移动均线'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        MA_data = np.array(w.wss(self.code_list,  "MA", "tradeDate="+"".join(date_list)+";MA_N=120;priceAdj=T;cycle=D").Data[0])
-        MA120 = pd.DataFrame(data=MA_data, index=self.code_list, columns=[self.factor_name])
-        return MA120
-
-
-# N日移动均线
+# N日移动均线，需继承
 class MA_N(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, N):
         self.N = N  # N日均线的长度
         factor_name = str(N) + '日移动均线'
@@ -166,8 +219,39 @@ class MA_N(SingleFactorReasearch):
         return MA_N
 
 
+# 5日移动平均线
+class MA_5(MA_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 5)
+
+
+# 10日移动平均线
+class MA_10(MA_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 10)
+
+
+# 20日移动平均线
+class MA_20(MA_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 20)
+
+
+# 60日移动平均线
+class MA_60(MA_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 60)
+
+
+# 120日移动平均线
+class MA_120(MA_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 120)
+
+
 # N日移动均线相对价格比例
 class MA_N_rel(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, N):
         self.N = N  # N日均线的长度
         factor_name = str(N) + '日移动均线相对价格比例'
@@ -182,94 +266,63 @@ class MA_N_rel(SingleFactorReasearch):
         return MA_N_rel
 
 
-# 5日平均换手率
-class VOL5(SingleFactorReasearch):
+# 5日移动均线相对价格比例
+class MA_5_rel(MA_N_rel):
     def __init__(self, date, code_list):
-        factor_name = '5日平均换手率'
+        super().__init__(date, code_list, 5)
+
+
+# N日平均换手率，需继承
+class VOLN(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N):
+        factor_name = str(N) + '日平均换手率'
+        self.N = N
         super().__init__(date, code_list, factor_name)
 
     def _calculate_factor(self):
         date_list = self.date
-        startDate = str(w.tdaysoffset(-5, "".join(date_list), "").Data[0][0])  # 区间数据
+        startDate = str(w.tdaysoffset(-self.N, "".join(date_list), "").Data[0][0])  # 区间数据
         vol_data = np.array(w.wss(self.code_list, "avg_turn_per", "startDate=" + "".join(startDate) + ";endDate=" + "".join(date_list)).Data[0])
         vol_data = vol_data / 100.0
         VOL5 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
         return VOL5
 
 
-# 10日平均换手率
-class VOL10(SingleFactorReasearch):
+# 5日平均换手率
+class VOL5(VOLN):
     def __init__(self, date, code_list):
-        factor_name = '10日平均换手率'
-        super().__init__(date, code_list, factor_name)
+        super().__init__(date, code_list, 5)
 
-    def _calculate_factor(self):
-        date_list = self.date
-        startDate = str(w.tdaysoffset(-10, "".join(date_list), "").Data[0][0])  # 区间数据
-        vol_data = np.array(w.wss(self.code_list, "avg_turn_per", "startDate=" + "".join(startDate) + ";endDate=" + "".join(date_list)).Data[0])
-        vol_data = vol_data / 100.0
-        VOL10 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
-        return VOL10
+
+# 10日平均换手率
+class VOL10(VOLN):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 10)
 
 
 # 20日平均换手率
-class VOL20(SingleFactorReasearch):
+class VOL20(VOLN):
     def __init__(self, date, code_list):
-        factor_name = '20日平均换手率'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        startDate = str(w.tdaysoffset(-20, "".join(date_list), "").Data[0][0])  # 区间数据
-        vol_data = np.array(w.wss(self.code_list, "avg_turn_per", "startDate=" + "".join(startDate) + ";endDate=" + "".join(date_list)).Data[0])
-        vol_data = vol_data / 100.0
-        VOL20 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
-        return VOL20
+        super().__init__(date, code_list, 20)
 
 
 # 60日平均换手率
-class VOL60(SingleFactorReasearch):
+class VOL60(VOLN):
     def __init__(self, date, code_list):
-        factor_name = '60日平均换手率'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        startDate = str(w.tdaysoffset(-60, "".join(date_list), "").Data[0][0])  # 区间数据
-        vol_data = np.array(w.wss(self.code_list, "avg_turn_per", "startDate=" + "".join(startDate) + ";endDate=" + "".join(date_list)).Data[0])
-        vol_data = vol_data / 100.0
-        VOL60 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
-        return VOL60
+        super().__init__(date, code_list, 60)
 
 
 # 120日平均换手率
-class VOL120(SingleFactorReasearch):
+class VOL120(VOLN):
     def __init__(self, date, code_list):
-        factor_name = '120日平均换手率'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        startDate = str(w.tdaysoffset(-120, "".join(date_list), "").Data[0][0])  # 区间数据
-        vol_data = np.array(w.wss(self.code_list, "avg_turn_per", "startDate=" + "".join(startDate) + ";endDate=" + "".join(date_list)).Data[0])
-        vol_data = vol_data / 100.0
-        VOL120 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
-        return VOL120
+        super().__init__(date, code_list, 120)
 
 
 # 240日平均换手率
-class VOL240(SingleFactorReasearch):
+class VOL240(VOLN):
     def __init__(self, date, code_list):
-        factor_name = '240日平均换手率'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        startDate = str(w.tdaysoffset(-240, "".join(date_list), "").Data[0][0])  # 区间数据
-        vol_data = np.array(w.wss(self.code_list, "avg_turn_per", "startDate=" + "".join(startDate) + ";endDate=" + "".join(date_list)).Data[0])
-        vol_data = vol_data / 100.0
-        VOL240 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
-        return VOL240
+        super().__init__(date, code_list, 240)
 
 
 # Aroon指标
@@ -285,8 +338,9 @@ class AROON(SingleFactorReasearch):
         return Aroon
 
 
-# MTM动量指标
-class MTM(SingleFactorReasearch):
+# MTM动量指标，需继承
+class MTM_interDay_N(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, MTM_interDay=6, MTM_N=6):
         factor_name = 'MTM指标'
         # MTM_interDay为间隔周期数，MTM_N为均值计算周期数，6为Wind默认参数
@@ -301,8 +355,15 @@ class MTM(SingleFactorReasearch):
         return MTM
 
 
-# RSI指标
-class RSI(SingleFactorReasearch):
+# MTM动量指标，默认版
+class MTM(MTM_interDay_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 6, 6)
+
+
+# RSI指标，需继承
+class RSI_N(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, N=6):
         factor_name = '相对强度指标RSI'
         self.N = N
@@ -315,12 +376,19 @@ class RSI(SingleFactorReasearch):
         return net_profit_grow_rate
 
 
-# BETA
-class BETA_V1(SingleFactorReasearch):
+# RSI指标，默认版
+class RSI(RSI_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 6)
+
+
+# BETA，需继承
+class BETA(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, refer_index='000300.SH', length=22):
-        factor_name = 'BETA'
+        factor_name = 'BETA_of_' + refer_index
         self.refer_index = refer_index  # 计算Beta值时用的参考指数
-        self.length = 22  # 计算Beta的历史数据长度
+        self.length = length  # 计算Beta的历史数据长度
         super().__init__(date, code_list, factor_name)
 
     def _calculate_factor(self):
@@ -331,7 +399,12 @@ class BETA_V1(SingleFactorReasearch):
         return BETA
 
 
-class BETA_V2(BETA_V1):
+class BETA_V1(BETA):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, refer_index='000300.SH', length=22)
+
+
+class BETA_V2(BETA):
     def __init__(self, date, code_list):
         super().__init__(date, code_list, refer_index='000016.SH', length=50)
 
@@ -376,9 +449,10 @@ class TURN_VOLATILITY_20(SingleFactorReasearch):
         return TURN_VOLATILITY_20
 
 
-# RelativePriceN，当前价格处于过去N个交易日股价的位置 算法：(close - low)/(high - low)
+# RelativePriceN，当前价格处于过去N个交易日股价的位置 算法：(close - low)/(high - low)，需继承
 class RelativePriceN(SingleFactorReasearch):
-    def __init__(self, date, code_list, N=252):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N):
         factor_name = 'FiftyTwoWeekHigh'
         self.N = N  # 计算窗口期
         super().__init__(date, code_list, factor_name)
@@ -394,8 +468,15 @@ class RelativePriceN(SingleFactorReasearch):
         return RelativePriceN
 
 
-# N日平均换手率
+# 当前价格处于过去240个交易日股价的位置
+class RelativePrice240(RelativePriceN):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 240)
+
+
+# N日平均换手率，需继承
 class VOL_N(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, N):
         self.N = N
         factor_name = str(N) + '日平均换手率'
@@ -408,6 +489,12 @@ class VOL_N(SingleFactorReasearch):
         vol_data = vol_data / 100.0
         VOL240 = pd.DataFrame(data=vol_data, index=self.code_list, columns=[self.factor_name])
         return VOL240
+
+
+# 240日平均换手率
+class VOL_240(VOL_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 240)
 
 
 # 总市值
@@ -479,8 +566,9 @@ class MoneyFlow20(SingleFactorReasearch):
         return MoneyFlow20
 
 
-# N日资金流量  # 用N日的收盘价、最高价及最低价的均值乘以20日成交量即可得到该交易日的资金流量
+# N日资金流量  # 用N日的收盘价、最高价及最低价的均值乘以20日成交量即可得到该交易日的资金流量，需继承
 class MoneyFlow_N(SingleFactorReasearch):
+    @abc.abstractmethod
     def __init__(self, date, code_list, N):
         self.N = N
         factor_name = str(N) + '日资金流量'
@@ -495,6 +583,12 @@ class MoneyFlow_N(SingleFactorReasearch):
         result = avg_price * volume
         MoneyFlow20 = pd.DataFrame(data=result, index=self.code_list, columns=[self.factor_name])
         return MoneyFlow20
+
+
+# 5日资金流量  # 用5日的收盘价、最高价及最低价的均值乘以20日成交量即可得到该交易日的资金流量
+class MoneyFlow_5(MoneyFlow_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 5)
 
 
 # ROE指标
@@ -643,6 +737,19 @@ class OperationRevenueGrowth(SingleFactorReasearch):
         return fa_orgr_ttm
 
 
+# 一致预测营业收入增长率（6个月数据计算）
+class EstimateNetRevenueGrowRateFY1_6M(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '一致预测营业收入增长率（6个月数据计算）'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        west_netprofit_fy1_6m = np.array(w.wss(self.code_list,  "west_sales_fy1_6m", "tradeDate="+"".join(date_list)).Data[0])
+        west_netprofit_fy1_6m = pd.DataFrame(data=west_netprofit_fy1_6m, index=self.code_list, columns=[self.factor_name])
+        return west_netprofit_fy1_6m
+
+
 # 销售毛利率
 class GrossIncomeRatio(SingleFactorReasearch):
     def __init__(self, date, code_list):
@@ -707,7 +814,7 @@ class ForecastEarningGrowth_FY1_3M(SingleFactorReasearch):
 
     def _calculate_factor(self):
         date_list = self.date
-        Forecast_data = np.array(w.wss(self.code_list, "west_netprofit_fy1_3m","tradeDate=" + "".join(date_list)).Data[0])
+        Forecast_data = np.array(w.wss(self.code_list, "west_netprofit_fy1_3m", "tradeDate=" + "".join(date_list)).Data[0])
         ForecastEarningGrowth = pd.DataFrame(data=Forecast_data, index=self.code_list, columns=[self.factor_name])
         return ForecastEarningGrowth
 
@@ -792,8 +899,8 @@ class EstimatePEFY1(SingleFactorReasearch):
 
 
 # 过去N年最大PE值
-class PE_MAX(SingleFactorReasearch):
-    def __init__(self, date, code_list, N = 5):
+class PE_MAX_N(SingleFactorReasearch):
+    def __init__(self, date, code_list, N):
         self.N = N
         factor_name = '过去' + str(N) + '年最大PE值'
         super().__init__(date, code_list, factor_name)
@@ -807,6 +914,12 @@ class PE_MAX(SingleFactorReasearch):
             pe_data.append(data)
         df = pd.DataFrame(data=pe_data, index=self.code_list, columns=[self.factor_name])
         return df
+
+
+# 过去5年最大PE值
+class PE_MAX_5(PE_MAX_N):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, 5)
 
 
 # PB指标
@@ -912,19 +1025,6 @@ class Revenue(SingleFactorReasearch):
         revenue_data = np.array(w.wss(self.code_list, "or_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
         revenue = pd.DataFrame(data=revenue_data, index=self.code_list, columns=[self.factor_name])
         return revenue
-
-
-# 一致预测营业收入增长率（6个月数据计算）
-class EstimateNetRevenueGrowRateFY16M(SingleFactorReasearch):
-    def __init__(self, date, code_list):
-        factor_name = '一致预测营业收入增长率（6个月数据计算）'
-        super().__init__(date, code_list, factor_name)
-
-    def _calculate_factor(self):
-        date_list = self.date
-        west_netprofit_fy1_6m = np.array(w.wss(self.code_list,  "west_sales_fy1_6m", "tradeDate="+"".join(date_list)).Data[0])
-        west_netprofit_fy1_6m = pd.DataFrame(data=west_netprofit_fy1_6m, index=self.code_list, columns=[self.factor_name])
-        return west_netprofit_fy1_6m
 
 
 # 实际税率（所得税费用/营业收入)
@@ -1043,7 +1143,7 @@ class NetLiquidAssetPerShare(SingleFactorReasearch):
 
 # 总负债
 class TotalLiability(SingleFactorReasearch):
-    def __init__(self,date, code_list):
+    def __init__(self, date, code_list):
         factor_name = '总负债'
         super().__init__(date, code_list, factor_name)
 
@@ -1128,11 +1228,292 @@ class ReturnsOneMonth(SingleFactorReasearch):
         return df
 
 
+# 经营活动现金流
+class OperateCashFlow(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '经营活动现金流'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list,  "fa_operactcashflow_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 经营活动现金流/净利润
+class CashFlowCoverRatio(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '利润现金保障倍数'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        operateCF = np.array(w.wss(self.code_list,  "fa_operactcashflow_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        netprofit = np.array(w.wss(self.code_list,  "fa_profit_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        data = operateCF/netprofit
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 销售费用
+class SellExpense(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '销售费用'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list, "fa_sellexpense_ttm", "unit=1;tradeDate=" + ''.join(date_list)).Data[0])
+        df = pd.DataFrame(data = data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 销售费用占营业收入比
+class SellExpenseRevenue(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '销售费用占营业收入比'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        sellexpense = np.array(w.wss(self.code_list, "fa_sellexpense_ttm", "unit=1;tradeDate=" + ''.join(date_list)).Data[0])
+        revenue_data = np.array(w.wss(self.code_list, "or_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        if revenue_data == None:
+            revenue_data = np.nan
+        if sellexpense == None:
+            sellexpense = np.nan
+        data = sellexpense/revenue_data
+        df = pd.DataFrame(data = data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 销售费用增长率
+class SellExpenseGrowth(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '销售费用增长率'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        sellexpense_now = np.array(w.wss(self.code_list, "fa_sellexpense_ttm", "unit=1;tradeDate=" + ''.join(date_list)).Data[0])
+        date_list[0] = str(int(date_list[0])-1)
+        sellexpense_prev = np.array(w.wss(self.code_list, "fa_sellexpense_ttm", "unit=1;tradeDate=" + ''.join(date_list)).Data[0])
+        if sellexpense_now == None:
+            sellexpense_now = np.nan
+        if sellexpense_prev == None:
+            sellexpense_prev = np.nan
+        data = (sellexpense_now - sellexpense_prev) / sellexpense_prev
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 非流动资产占比
+class NonCurrentAssetRatio(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '非流动资产占比'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list,  "fa_noncurassetsratio", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 资产周转率
+class AssetTurnoverRatio(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '资产周转率'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list,  "fa_taturn_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 应收账款周转率
+class AccRecTurnRatioV1(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '应收账款周转率'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list,  "fa_arturn_ttm", "tradeDate=" + "".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 总资产
+class TotalAsset(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '总资产'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list, "fa_totassets", "unit=1;tradeDate="+"".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 只支持报告期数据
+
+# 研发费用目前只支持报告期数据，19年1月开始对研发费用的会计政策变更，从管理费用中剥离出研发费用
+class RDExpense(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '研发费用'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list, "rd_exp", "unit=1;rptDate=" + ''.join(date_list) + ";rptType=1").Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 研发费用目前只支持报告期数据，19年1月开始对研发费用的会计政策变更，从管理费用中剥离出研发费用
+class RDExpenseRevenue(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '研发费用占营业收入比'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        RDExpense = np.array(w.wss(self.code_list, "rd_exp", "unit=1;rptDate=" + ''.join(date_list) + ";rptType=1").Data[0])
+        revenue_data = np.array(w.wss(self.code_list, "or_ttm", "unit=1;tradeDate=" + "".join(date_list)).Data[0])
+        if revenue_data == None:
+            revenue_data = np.nan
+        if RDExpense == None:
+            RDExpense = np.nan
+        data = RDExpense / revenue_data
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 应收账款周转率目前只支持报告期数据
+class AccRecTurnRatioV2(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '应收账款周转率'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list,  "arturn", "rptDate=" + "".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 外资持股占流通市值比
+class ForeignCapitalHoldingRatio(SingleFactorReasearch):
+    def __init__(self, date, code_list):
+        factor_name = '外资持股占流通市值比'
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        date_list = self.date
+        data = np.array(w.wss(self.code_list, "share_pct_Ntofreefloat", "tradeDate=" + "".join(date_list)).Data[0])
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+# 过去N日外资持股比例平均增速，需继承
+class ForeignCapitalHoldingRatioGrowth_Avg(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N=30):
+        factor_name = '过去' + str(N) + '日外资持股比例平均增速'
+        self.N = N
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        temp_date = get_trading_date_from_now("-".join(self.date), -int(3), ql.Days)
+        data_start = np.array(w.wss(self.code_list, "share_pct_Ntofreefloat", "tradeDate=" + str(temp_date)).Data[0])
+        data_end = np.array(w.wss(self.code_list, "share_pct_Ntofreefloat", "tradeDate=" + "".join(self.date)).Data[0])
+        avggrowth = (data_end - data_start) / self.N
+        df = pd.DataFrame(data=avggrowth, index=self.code_list, columns=[self.factor_name])
+        df = df.dropna()
+        return df
+
+
+# 过去N日外资持股比例增速，线性回归法，需继承
+class ForeignCapitalHoldingRatioGrowth_LR(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N=5):
+        factor_name = '过去' + str(N) + '日外资持股比例增速'
+        self.N = N
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        vol_data = []
+        i = 0
+        j = 0
+        while True:
+            temp_date = get_trading_date_from_now("-".join(self.date), -int(i), ql.Days)
+            vol = np.array(w.wss(self.code_list, "share_pct_Ntofreefloat", "tradeDate=" + str(temp_date)).Data[0])
+            i = i + 1
+            if vol[0] is None:  # 判断是否为沪港通交易日，若不是，则继续前推交易日
+                continue
+            j = j + 1
+            vol_data.append(vol)
+            if j == self.N:  # 提取够数据，跳出循环
+                break
+        vol_data.reverse()  # 逆序
+        vol_data = np.array(vol_data)
+        X = np.linspace(0, self.N-1, self.N)[:, np.newaxis]
+        X = np.c_[np.ones((self.N, 1)), X]
+        result = np.linalg.inv(X.T.dot(X)).dot(X.T).dot(vol_data)
+        data = result[1]
+        data = np.array(data).transpose()
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
+class ForeignCapitalHoldingRatioGrowth_LR_10(ForeignCapitalHoldingRatioGrowth_LR):
+    def __init__(self, date, code_list):
+        super().__init__(date, code_list, N=10)
+
+
+# 过去N日外资持股比例增速加速度，线性回归法，需继承
+class ForeignCapitalHoldingRatioGrowth_LR_ACC(SingleFactorReasearch):
+    @abc.abstractmethod
+    def __init__(self, date, code_list, N=6):
+        factor_name = '过去' + str(N) + '日外资持股增速加速度'
+        self.N = N
+        super().__init__(date, code_list, factor_name)
+
+    def _calculate_factor(self):
+        vol_data = []
+        i = 0
+        j = 0
+        while True:
+            temp_date = get_trading_date_from_now("-".join(self.date), -int(i), ql.Days)
+            vol = np.array(w.wss(self.code_list, "share_pct_Ntofreefloat", "tradeDate=" + str(temp_date)).Data[0])
+            i = i + 1
+            if vol[0] is None:  # 判断是否为沪港通交易日，若不是，则继续前推交易日
+                continue
+            j = j + 1
+            vol_data.append(vol)
+            if j == self.N:  # 提取够数据，跳出循环
+                break
+        vol_data.reverse()  # 逆序
+        vol_data = np.array(vol_data)
+        X = np.linspace(0, self.N-1, self.N)[:, np.newaxis]
+        X = np.c_[np.ones((self.N, 1)), X, X*X]
+        result = np.linalg.inv(X.T.dot(X)).dot(X.T).dot(vol_data)
+        data = result[2]
+        data = np.array(data).transpose()
+        df = pd.DataFrame(data=data, index=self.code_list, columns=[self.factor_name])
+        return df
+
+
 if __name__ == '__main__':
     date = '2017-05-09'
     w.start()
     code_list = w.wset("sectorconstituent", "date=" + date + ";windcode=000300.SH").Data[1]  # 沪深300动态股票池
     # code_list = ['000001.SZ', '000002.SZ']
-    factor_model = SW1IndustryOneHot(date, code_list)
+    factor_model = ForeignCapitalHoldingRatioGrowth_LR(date, code_list)
     df = factor_model.get_factor()
     print(df)

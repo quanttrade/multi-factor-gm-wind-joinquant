@@ -3,9 +3,7 @@ import QuantLib as ql
 import pandas as pd
 from WindPy import w
 import os
-import numpy as np
-import jqdatasdk
-from sqlalchemy.orm.query import Query
+import datetime
 
 # 申万1级行业列表
 SW1_INDEX = [['801010.SI', '农林牧渔'], ['801020.SI', '采掘'], ['801030.SI', '化工'], ['801040.SI', '钢铁'], ['801050.SI', '有色金属'],
@@ -18,12 +16,21 @@ SW1_INDEX = [['801010.SI', '农林牧渔'], ['801020.SI', '采掘'], ['801030.SI
 
 # 计算不同交易日的函数
 def get_trading_date_from_now(date_now, diff_periods, period=ql.Days):
-    calculation_date = ql.Date(int(date_now.split('-')[2]), int(date_now.split('-')[1]), int(date_now.split('-')[0]))
-    calendar = ql.China()
-    date_diff = calendar.advance(calculation_date, diff_periods, period).to_date().strftime('%Y-%m-%d')
-    # 临时修正错误，是包QuantLib的错误，节假日问题
-    if date_now == '2019-01-02':
-        return '2018-12-28'
+    always_using_ql = False  # 是否全部使用quantlib处理日期，否则只在某些情形使用quantlib处理日期
+    if (int(date_now.split('-')[0]) <= 2019 and int(date_now.split('-')[1]) <= 9 and diff_periods <= 1) or (int(date_now.split('-')[0]) <= 2018 and diff_periods <= 1) or always_using_ql:
+        calculation_date = ql.Date(int(date_now.split('-')[2]), int(date_now.split('-')[1]),
+                                   int(date_now.split('-')[0]))
+        calendar = ql.China()
+        date_diff = calendar.advance(calculation_date, diff_periods, period).to_date().strftime('%Y-%m-%d')
+    else:  # 其余日子用wind处理
+        if period==ql.Days:
+            w.start()
+            date_diff = w.tdaysoffset(diff_periods, date_now, '').Data[0][0].strftime('%Y-%m-%d')
+            if diff_periods == 0:  # 非交易日顺延到下一个交易日
+                date_now_date = datetime.date.fromisoformat(date_now)
+                date_diff_date = datetime.date.fromisoformat(date_diff)
+                if date_diff_date < date_now_date:
+                    date_diff = w.tdaysoffset(1, date_now, '').Data[0][0].strftime('%Y-%m-%d')
     return date_diff
 
 
@@ -68,7 +75,7 @@ def get_factor_from_wind(code_list, factor_list, date):
 
 
 # 无缓存版本
-def get_factor_from_wind_v2(code_list, factor_list, date):
+def get_factor_from_wind_without_cache(code_list, factor_list, date):
     # 用单因子研究\single_factor.py中的因子类直接获取数据
     factors_dfs = []
     for factor in factor_list:
@@ -110,5 +117,47 @@ def get_SW1_industry(date, code_list):
     return sw1_result
 
 
+# 每月根据日期整理交易日列表
+def get_trading_date_list_by_day_monthly(BACKTEST_START_DATE, BACKTEST_END_DATE, TRADING_DATES_LIST):
+    trading_date_list = []  # 记录备选交易日列表
+    w.start()
+    date_to_be_selected = w.tdays(BACKTEST_START_DATE, BACKTEST_END_DATE, "").Data[0]  # 获取交易日列表
+    date_to_be_selected = [d.strftime('%Y-%m-%d') for d in date_to_be_selected]
+    i = 0
+    while True:
+        print('处理日期：' + str(i))
+        date_now = date_to_be_selected[i]
+        dates_trading = [get_trading_date_from_now(date_now.split('-')[0] + '-' + date_now.split('-')[1] + '-' + TRADING_DATE, 0, ql.Days)
+                         for TRADING_DATE in TRADING_DATES_LIST]
+        if date_now in dates_trading:
+            trading_date_list.append(date_now)
+        i += 1
+        if date_now == BACKTEST_END_DATE:
+            break
+    return trading_date_list
+
+
+# 根据月份日期整理交易日列表
+def get_trading_date_list_by_month_by_day(BACKTEST_START_DATE, BACKTEST_END_DATE, MONTHS, TRADING_DATES_LIST):
+    trading_date_list = []  # 记录备选交易日列表
+    w.start()
+    date_to_be_selected = w.tdays(BACKTEST_START_DATE, BACKTEST_END_DATE, "").Data[0]  # 获取交易日列表
+    date_to_be_selected = [d.strftime('%Y-%m-%d') for d in date_to_be_selected]
+    i = 0
+    print('回测开始日期：' + BACKTEST_START_DATE + '，结束日期：' + BACKTEST_END_DATE)
+    while True:
+        print('处理日期：' + str(i))
+        date_now = date_to_be_selected[i]
+        dates_trading = [get_trading_date_from_now(date_now.split('-')[0] + '-' + date_now.split('-')[1] + '-' + TRADING_DATE, 0, ql.Days)
+                         for TRADING_DATE in TRADING_DATES_LIST]
+        if date_now in dates_trading:
+            trading_date_list.append(date_now)
+        i += 1
+        if date_now == BACKTEST_END_DATE:
+            break
+    trading_date_list = [d for d in trading_date_list if d.split('-')[1] in MONTHS]  # 按照选定的调仓月份进行筛选
+    return trading_date_list
+
+
 if __name__ == '__main__':
-    print(get_trading_date_from_now('2018-01-02', -1))
+    print(get_trading_date_from_now('2019-01-05', 0))
